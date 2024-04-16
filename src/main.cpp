@@ -2,11 +2,10 @@
 #include "Debounced_DigitalRead.h"
 
 
-// TODO -- consider adding very short delay after packet send, if helpful
 
-// TODO -- Consider adding something for barrel jack detection and pico connection detection
+// TODO -- Consider adding something for barrel jack detection
 //         Currently don't utilize and can't really think of how it might be helpful
-//         Pins are designated and debounced digital read objects created, just not used or updating
+
 #define BAUD_RATE 921600
 
 #define SERIAL1_TX 0
@@ -35,6 +34,7 @@ SerialPIO serialPIOInstances[4] = {
   SerialPIO(PIO_3_TX, PIO_3_RX, FIFO_SIZE),
   SerialPIO(PIO_4_TX, PIO_4_RX, FIFO_SIZE)
 };
+
 
 HardwareSerial* serialObjects[NUM_SERIAL_OBJECTS];
 
@@ -72,7 +72,6 @@ void setup() {
   for(int i = 0; i < NUM_SERIAL_OBJECTS; i++){
     picoConnectionSensor[i].begin();
     serialObjects[i]->begin(BAUD_RATE);
-
   }
   rp2040.wdt_begin(1000);
 }
@@ -102,8 +101,9 @@ void handleUnitySerialInputs(){
         if(Serial.read() == 0){
           return;
         }
-        // delayMicroseconds(10);
+        // delayMicroseconds(5);
       }
+      else return;
     }
     return;
   }
@@ -143,6 +143,7 @@ void handleUnitySerialInputs(){
         }
         if(_nextByte == 0) return;
       }
+      else return;
     }
   }
 
@@ -160,21 +161,29 @@ void handleUnitySerialInputs(){
         }
         // delayMicroseconds(10);
       }
+      else{return;}
     }
   }
   serialObjects[designatorCode]->write(firstByte);
   serialObjects[designatorCode]->write(configByte);
   while(true){
     if(millis() - timeoutTimer > 40){
-      // debug
+     // debug
       return;
     }
-    if(Serial.available()){
+    int availableBytes = Serial.available();
+    for(int i = 0; i < availableBytes; i++){
       byte _nextByte = Serial.read();
       serialObjects[designatorCode]->write(_nextByte);
-      if(_nextByte == 0) return; // finished sending packet
-      // delayMicroseconds(10);
+      if(_nextByte == 0) return;
     }
+    // if(Serial.available()){
+    //   byte _nextByte = Serial.read();
+    //   serialObjects[designatorCode]->write(_nextByte);
+    //   if(_nextByte == 0) return; // finished sending packet
+    //   // delayMicroseconds(10);
+    // }
+    // else return;
   }
 }
 
@@ -194,7 +203,7 @@ void handlePicoSerialInputs(){
           if(serialObjects[i]->peek() != -1){ // if "available" doesn't reflect the buffer
               availableBytes = 1; 
           }
-          else continue;
+          else break;
       }
       // delayMicroseconds(40);
       for(int b = 0; b < availableBytes; b++){
