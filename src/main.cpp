@@ -164,7 +164,7 @@ void handleUnitySerialInputs(){
 
   if(designatorCode > 6 || designatorCode == 0){ // shouldn't happen?
     
-    debug("invalid designator from Unity");
+    debug("invalid designator from Unity", designatorCode);
     clearIncomingBuffer(&Serial);
   }
   uint8_t serialObjectIndex = designatorCode - 1;
