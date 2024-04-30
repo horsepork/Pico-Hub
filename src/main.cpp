@@ -93,7 +93,9 @@ void loop(){
     picoConnectionSensor[i].update();
   }
 
-  handleUnitySerialInputs();
+  while(Serial.available()){
+    handleUnitySerialInputs();
+  }
   handlePicoSerialInputs();
 } 
 
@@ -107,19 +109,39 @@ void handleUnitySerialInputs(){
 
   // check for packet start byte (0)
   while(true){
-    if(Serial.read() == 0) break; // continue to read the packet
-    if(!clearUnitySerialBuffer()) return; // if the buffer clears, try again
-    if(millis() - timeoutTimer > 30) return; 
+    if(millis() - timeoutTimer > 30){
+      // debug("0 timeout");
+      return; 
+    } 
+    char input = Serial.read();
+    if(input == 0) break; // continue on to read the packet
+    if(clearUnitySerialBuffer() && Serial.available()){ 
+      continue; // try again?
+    }
+    else{
+      return;
+    }
+  }
+  // wait for first byte
+  uint8_t firstByte;
+  timeoutTimer = millis();
+  while(true){
+    if(millis() - timeoutTimer > 2){
+      return;
+    }
+    if(Serial.available()){
+      firstByte = Serial.read();
+      if(firstByte == 0){ // means the previously read 0 was probably a packet termination byte, so getting a second 0 is okay
+        delayMicroseconds(150);
+        if(!Serial.available()) return;
+        firstByte = Serial.read();
+        if(firstByte == 0) return;
+      }
+      break;
+    }
   }
   
-  uint8_t firstByte = Serial.read();
-  if(firstByte == 0){ // means the previously read 0 was probably a packet termination byte, so getting a second 0 is okay
-    if(!Serial.available()) return;
-    firstByte = Serial.read();
-    if(firstByte == 0) return;
-  }
   if(firstByte == 1){ // means the config byte is 0. Would not happen unless we want to be able to send the same packet (aside from ID request) to all 6 Picos. Is an error for now.
-    // just ignore inputs until 0 (or timeout) then reset
     // debug("config byte from Unity is 0");
     clearUnitySerialBuffer();
     return;
@@ -134,27 +156,46 @@ void handleUnitySerialInputs(){
       break;
     }
     if(millis() - timeoutTimer > 3){
-      debug("timeout waiting for config byte from Unity");
+      // debug("timeout waiting for config byte from Unity");
       clearUnitySerialBuffer();
-      if(Serial.available()) break;
-      else return;
+      return;
     }
   }
   
   timeoutTimer = millis();
   // if id msg, send to all
+  // modifying both the config byte and the checksum bytes for each connected device
   if(configByte == 0b00001111){
+    uint8_t checksumBuffer[2];
+    uint8_t checksumBufferIndex = 0;
+    while(true){
+      if(Serial.available()){
+        checksumBuffer[checksumBufferIndex++] = Serial.read();
+        if(checksumBufferIndex == 2) break;
+      }
+      if(millis() - timeoutTimer > 3){
+        // debug("timeout waiting for checksum from Unity");
+        clearUnitySerialBuffer();
+        return;
+      }
+    }
+
+    uint16_t _checksum = (checksumBuffer[0] & 0xFF) + (checksumBuffer[1] << 8);
+
     for(int i = 0; i < NUM_SERIAL_OBJECTS; i++){
       if(!picoConnectionSensor[i].read()) continue;
+      uint8_t newConfigByte = configByte + ((i + 1) << 4);
+      uint16_t newChecksum = _checksum - configByte + newConfigByte;
       serialObjects[i]->write((uint8_t)0);
       serialObjects[i]->write(firstByte);
-      uint8_t newConfigByte = configByte + ((i + 1) << 4);
       serialObjects[i]->write(newConfigByte);
+      serialObjects[i]->write(newChecksum & 0xFF);
+      serialObjects[i]->write(newChecksum >> 8);
     }
     timeoutTimer = millis();
     while(true){
-      if(millis() - timeoutTimer > 10){
-        debug("Unity packet timeout (ID)");
+      if(millis() - timeoutTimer > 5){
+        // debug("Unity packet timeout (ID)");
         clearUnitySerialBuffer();
         return;
       }
@@ -176,16 +217,21 @@ void handleUnitySerialInputs(){
   timeoutTimer = millis();
 
   if(designatorCode > 6 || designatorCode == 0){ // shouldn't happen?
-    debug("invalid designator from Unity", designatorCode);
+    // debug("invalid designator from Unity", designatorCode);
     clearUnitySerialBuffer();
     return;
   }
   uint8_t serialObjectIndex = designatorCode - 1;
+  if(!picoConnectionSensor[serialObjectIndex].read()){
+    // debug("pico not connected", designatorCode);
+    clearUnitySerialBuffer();
+    return;
+  }
   serialObjects[serialObjectIndex]->write((uint8_t)0);
   serialObjects[serialObjectIndex]->write(firstByte);
   serialObjects[serialObjectIndex]->write(configByte);
   while(true){
-    if(millis() - timeoutTimer > 30){
+    if(millis() - timeoutTimer > 20){
       debug("Unity timeout (packet)");
       clearUnitySerialBuffer();
       return;
@@ -201,7 +247,7 @@ void handleUnitySerialInputs(){
   }
 }
 
-
+need to handle pings w/out correct designator
 void handlePicoSerialInputs(){
   for(int i = 0; i < NUM_SERIAL_OBJECTS; i++){
     if(!picoConnectionSensor[i].read()) continue;
@@ -209,33 +255,63 @@ void handlePicoSerialInputs(){
 
     uint32_t timeoutTimer = millis();
      // check for packet start byte (0)
+    char __input = serialObjects[i]->read();
+    if(__input != 0){
+      debug("no 0 from pico", __input);
+      clearPicoSerialBuffer(serialObjects[i]);
+      continue;
+    }
+    // while(true){
+    //   if(serialObjects[i]->read() == 0) break; // continue to read the packet
+    //   if(!clearPicoSerialBuffer(serialObjects[i])) return; // if the buffer clears, try again
+    //   if(millis() - timeoutTimer > 30) return; 
+    // }
+    uint8_t firstByte;
+    timeoutTimer = millis();
+    bool needToContinue = false;
     while(true){
-      if(serialObjects[i]->read() == 0) break; // continue to read the packet
-      if(!clearPicoSerialBuffer(serialObjects[i])) return; // if the buffer clears, try again
-      if(millis() - timeoutTimer > 30) return; 
+      if(millis() - timeoutTimer > 3){
+        debug("first byte timeout", i);
+        needToContinue = true;
+        break;
+      }
+      if(serialObjects[i]->available()){
+        firstByte = serialObjects[i]->read();
+        if(firstByte == 0){ // means the previously read 0 was probably a packet termination byte, so getting a second 0 is okay
+          delayMicroseconds(150);
+          if(!serialObjects[i]->available()){
+            needToContinue = true;
+            break;
+          }
+          firstByte = serialObjects[i]->read();
+          if(firstByte == 0){
+            needToContinue = true;
+            break;
+          }
+        }
+        break;
+      }
+      
     }
-    
-    uint8_t firstByte = serialObjects[i]->read();
-    if(firstByte == 0){ // means the previously read 0 was probably a packet termination byte, so getting a second 0 is okay
-      if(!serialObjects[i]->available()) return;
-      firstByte = serialObjects[i]->read();
-      if(firstByte == 0) return;
-    }
-
+    if(needToContinue) continue;
     // 1 means config byte is 0, which shouldn't ever be the case
     if(firstByte == 1){
       debug("err: config byte is 0", i + 1);
       clearPicoSerialBuffer(serialObjects[i]);
       continue;
     }
-
     timeoutTimer = millis();
+    while(!serialObjects[i]->available()){
+      if(millis() - timeoutTimer > 2){
+        debug("config byte timeout");
+        needToContinue = true;
+        break;
+      }
+    }
+    if(needToContinue) continue;
+    uint8_t configByte = serialObjects[i]->read();
     Serial.write((uint8_t)0);
     Serial.write(firstByte); // initial zero offset for COBS
-    while(!Serial.available()){
-      if(millis() - timeoutTimer > 5) return;
-    }
-    uint8_t configByte = Serial.read();
     uint8_t designatorCode = configByte & PICO_DESIGNATOR_CODE_MASK;
     if(designatorCode != ((i + 1) << 4)){
       configByte = (configByte & 0b10001111) + ((i + 1) << 4);
@@ -273,8 +349,22 @@ void handlePicoSerialInputs(){
 
 bool clearUnitySerialBuffer(int timeoutLength){
   uint32_t timer = millis();
+  uint8_t clearedBuffer[100];
+  int index = 0;
   while(true){
-    if(millis() - timer > timeoutLength) return false;
+    if(millis() - timer > timeoutLength){
+      clearedBuffer[index] = 0;
+      debug((char*)clearedBuffer, 0);
+      return false;
+    }
+    if(Serial.available()){
+      clearedBuffer[index] = Serial.read();
+      if(clearedBuffer[index] == 0){
+        debug((char*)clearedBuffer, 1);
+        return true;
+      }
+      index++;
+    }
     if(Serial.available() && Serial.read() == 0) return true;
   }
   return true;
@@ -284,7 +374,9 @@ bool clearUnitySerialBuffer(int timeoutLength){
 bool clearPicoSerialBuffer(HardwareSerial* _serialObject, int timeoutLength){
   uint32_t timer = millis();
   while(true){
-    if(millis() - timer > timeoutLength) return false;
+    if(millis() - timer > timeoutLength){
+      return false;
+    }
     if(_serialObject->available() || _serialObject->peek() != -1){
       if(_serialObject->read() == 0) return true;
     }
@@ -306,23 +398,34 @@ void hubPing(){
 void debug(const char* msg, uint8_t infoByte){
   uint8_t msgLength = strlen(msg);
   uint8_t bufferAndSingleByte[msgLength + 1 + 4] = {'(', infoByte, ')', ' '}; // + 1 here b/c ports are zero indexed
-  for(int i = 0; i < msgLength + 1; i++){ // + 1 so we include null terminators
+  for(int i = 0; i < msgLength; i++){
     bufferAndSingleByte[i+4] = msg[i];
   }
+  bufferAndSingleByte[msgLength+4] = 0; //null terminator
   debug((char*)bufferAndSingleByte);
 } 
 
 void debug(const char* msg){
-  static uint8_t debugOutputBuffer[131] = {0b10000000, 0, 0, 0}; // capped at 127 characters
-  debugOutputBuffer[1] = 0;
   uint8_t msgLength = strlen(msg);
-  debugOutputBuffer[3] = msgLength - 1;
+  if(msg[0] == '(' && msg[1] == 0){
+    msgLength = 2;
+    while(true){
+      if(msg[msgLength] == '\0') break;
+      msgLength++;
+      if(msgLength >= 127) break;
+    }
+  }
+  uint8_t debugOutputBuffer[132] = {0b10000000, 0, 0, 0, msgLength - 1}; // capped at 127 data characters
+  
+  uint16_t checksum = 0b10000000 + debugOutputBuffer[4];
   for(int i = 0; i < msgLength; i++)
   {
-    debugOutputBuffer[1] += (uint8_t)msg[i];
-    debugOutputBuffer[i + 4] = (uint8_t)msg[i];
-    if(i+4 >= 131) break;
+    checksum += (uint8_t)msg[i];
+    debugOutputBuffer[i + 5] = (uint8_t)msg[i];
+    if(i+5 >= 131) break;
   }
+  debugOutputBuffer[1] = checksum & 0xFF;
+  debugOutputBuffer[2] = checksum >> 8;
   Serial.write((uint8_t)0);
-  _packetSerialSend(&Serial, debugOutputBuffer, msgLength + 4);
+  _packetSerialSend(&Serial, debugOutputBuffer, msgLength + 5);
 }
