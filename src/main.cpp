@@ -229,7 +229,7 @@ void handlePicoSerialInputs(){
       continue;
     }
 
-    uint32_t timeoutTimer = millis();
+    timeoutTimer = millis();
     Serial.write((uint8_t)0);
     Serial.write(firstByte); // initial zero offset for COBS
     while(!Serial.available()){
